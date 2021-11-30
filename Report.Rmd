@@ -1,0 +1,344 @@
+---
+title: "Movies Recommendation in Flixste"
+author: "Inês Rocha, Alona Spasenko"
+date: "16/05/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+Neste trabalho foram utilizados os modelos de recommendação:
+* Popularity
+* Association Rules
+* Collaborative Filtering
+* Context-aware recommendation
+Estes modelos foram aplicados a matrizes reais (matrizes com os ratings dos utilizadores) e a matrizes binárias (matrizes com indicação se um utilizador viu um certo filme).
+
+## Problem definition
+Com a evolução do nosso mundo atual, é cada vez mais importante reter a atenção dos utilizadores, e uma das estratégias para obter isto é recomendar conteúdo que o utilizador goste.
+Dado a plataforme de filmes Flixer, vamos obter um sistema de recomendação que permita que os utilizadores recebam os melhores filmes que se enquadram com as suas preferências.  
+
+## Exploratory data analysis and pre-processing steps
+### Pre-Processing steps
+
+```{r Import libraries, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(na.tools)
+library(tidyverse)
+library(devtools)
+library(tidyimpute)
+library(arules)
+library(arulesViz)
+library(recommenderlab)
+
+directory <- getwd()
+setwd(directory)
+```
+Ao ler os ficheiros txt, verificamos que o ficheiro "movie.txt" tinha uma vírgula separar o nome do filme do seu ID. Na primeira tentativa foi usada essa vírgula como o separador, mas apercebemo-nos que também existiam vírgulas nos títulos. Então para conseguirmos passar os dados para um tabela criámos uma expressão regular (",([^,]*)$", "^\\1") que encontrava a última vírgula (a vírgula que separa o nome do id) e substituía essa vírgula pelo caracter '^'.  
+Com esta substituição já podíamos na função read.table usar '^' como o separador e obter os dados corretos.
+
+```{r Show how to read movie txt, eval=FALSE, include=TRUE}
+temp <-read.table(text = gsub(",([^,]*)$", "^\\1", readLines("movie.txt")),
+                  header = TRUE, sep="^", fill = TRUE,comment.char = "",
+                  na.strings = "?")
+movies <- tbl_df(temp)
+```
+
+Depois de termos conseguido lido os ficheiros necessários foi feita uma limpeza aos dados:
+
+1. Remover users que não tenham um destes géneros: "Female", "Male", "N/A"
+2. Remover a data e a hora dos ratings
+3. Existiam filmes com algo frases semelhante a "&#039;" no título, por isso foi criada uma expressão regular para as remover.
+
+```{r Remove strings from movies, eval=FALSE, include=TRUE}
+movies <- movies %>% mutate(moviename =gsub("&#[0-9]*;", "", moviename))
+```
+4. Remover linhas da datatable profile que tinham NA's
+5. Foi criada uma tabela chamada aggMovies onde continha o idMovie, o número de Ratings que esse filme teve e a médias das suas avaliações, e com essa tabela:
+    + Existia muitos filmes com pouca ratings, então para termos filmes com um número substancial de rating, removemos os filmes que não tinham um número de ratings maior que 2000
+    + Removemos esses mesmos filmes da tabela movies
+    + Removemos as avaliações que continha esses filmes removidos
+
+### Exploratory data
+**Análise dos filmes**    
+
+Com o objetivo de fazer uma avaliação geral dos filmes foram considerados a quantidade de reviews e os ratings atribuídos pelos utilizadores.  
+Assim, foi obtido o seguinte gráfico para considerar os top-10 filmes mais votados:  
+
+```{r echo=FALSE, warning=FALSE}
+load("LoadData/Exploration/top_best_movies_order.RData")
+library(knitr)
+kable(top_best_movies_order, caption="Os melhores filmes mais votados e com melhor score")
+```
+
+De seguida foram analisados os top-10 filmes com o melhor score: 
+
+```{r echo=FALSE, fig.show='hold',fig.height=3.5}
+load("LoadData/Exploration/ggplot_mais_votados.RData")
+ggplot_mais_votados
+```
+
+Assim, pode-se afirmar que existe uma correlação positiva entre os filmes mais votados e os filmes com os melhores scores, visto estas duas classes têm seis filmes em comum, como por exemplo ‘Pirates of the Caribbean: Dead Mans Chest’ que é o segundo filme mais votado e o segundo filme com melhor score.  
+  
+```{r echo=FALSE, fig.show='hold',fig.height=3.5}
+load("LoadData/Exploration/ggplot_top_rating.RData")
+ggplot_top_rating
+```
+
+**Análise dos utilizadores**  
+
+Relativamente a análise de utilizadores foi verificado que o género de utilizadores foi dividido proporcionalmente entre homens e mulheres.  
+
+```{r echo=FALSE, fig.show='hold',fig.width=3, fig.height=3}
+load("LoadData/Exploration/ggplot_gender_distribution.RData")
+ggplot_gender_distribution
+```   
+
+De seguida foi feita uma análise relativamente ao número de votos de acordo com a idade e o género dos utilizadores.
+
+É de notar que, para análise de número de ratings por idade, foi guardada a informação ‘NA’ sobre o género, isto é, para além dos géneros masculino e feminino, foi guardada a informação dos utilizadores cuja informação de sexo se perdeu, pois como se verificou no gráfico que segue, independentemente do género o número de reviews atinge o seu pico, aproximadamente nos 20 anos de idade.
+
+Assim, foi verificado o comportamento (relativamente a deixar uma avaliação sobre um filme) bastante semelhante entre homens e mulheres, independentemente da idade em geral, exceto no caso de utilizadores mulheres entre 20 e 60 anos, que deixam ligeiramente menos reviews do que os homens na mesma idade.
+
+Relativamente aos utilizadores com o género ‘N/A’, os mesmos seguem aproximadamente a mesma curva de número de reviews como os homens e mulheres, mas com as quantidades menores.
+
+Verificou-se que independentemente do género da pessoa, a idade mais propícia a reviews é entre 20 e 35 anos.
+
+```{r echo=FALSE, warning=FALSE, fig.show='hold', fig.height=3}
+load("LoadData/Exploration/ggplot_ratings_by_age.RData")
+ggplot_ratings_by_age
+```   
+
+## Modeling approaches
+
+Para testar os modelos foram criados dois utilizadores:
+
+* Um utilizador com o nome de newUserReal, que contém os dados dos seus ratings e que vai ser transformado numa "RealRatingMatrix". Os ratings do utilizador:  
+```{r Show active user, echo=FALSE}
+load("LoadData/activeUserRating.RData")
+activeUserRating
+```
+* Um outro utilizador com o nome de newUserBinary que viu os mesmo filmes, mas em vez de ter os ratings, tem só o valor de 1 (True) a indicar que ele os viu. Esse utilizador vai ser transformado numa "BinaryRatingMatrix". 
+
+### Popularity
+**Informação binária**  
+Para obter um modelo de recomendação baseado na popularidade e com dados binários, primeiro convertemos a tabela ratingsTimed numa "BinaryRatingMatrix".  
+
+A seguir criamos o modelo com o método "POPULAR"
+```{r eval=FALSE, include=TRUE}
+modelPop <- Recommender(data=popMatrix, method="POPULAR")
+```
+
+Usando o utilizador newUserBinary obtemos as seguintes recomendações com valor de N (1,2,5)
+```{r echo=FALSE}
+load("LoadData/Popularity/PopResultBinary.RData")
+moviesRecommended1
+moviesRecommended2
+moviesRecommended5
+```
+**Informação não binária**  
+Para obter um modelo de recomendação baseado na popularidade e com dados não binários, primeiro convertemos a tabela ratingsTimed numa "RealRatingMatrix".  
+
+A seguir criamos o modelo com o método "POPULAR"
+```{r eval=FALSE, include=TRUE}
+modelPop <- Recommender(data=popMatrix, method="POPULAR")
+```
+Usando o utilizador newUserReal obtemos as seguintes recomendações com valor de N (1,2,5)
+```{r echo=FALSE}
+load("LoadData/Popularity/PopResultReal.RData")
+moviesRecommended1
+moviesRecommended2
+moviesRecommended5
+```
+   
+   
+### Association Rules
+**Informação binária** 
+
+Para obter um modelo de recomendação baseado em regras de associação e com dados binários, primeiro convertemos a tabela ratingsTimed numa "BinaryRatingMatrix".  
+A seguir criámos o modelo usando o método "arules":
+```{r eval=FALSE, include=TRUE}
+modelAR <- Recommender(assoRulesMatrix,"AR", parameter = list(support=0.05, confidence=0.75))
+```
+No inicio tínhamos usado um suporte de 0.1 e confiança de 0.75 (o suporte é pequeno porque temos uma matriz muito esparsa), mas como o modelo só gerou 9 regras, não conseguíamos aplicar nenhuma ao nosso utilizador (newUserBinary), então reduzimos o suporte.  
+Com um suporte de 0.6 obtemos só uma recomendação, mas com 0.5 geramos 16862 regras.
+
+```{r echo=FALSE}
+load("LoadData/AssociationRules/assoRulesMatrix.RData")
+getModel(modelAR)$rule_base
+```
+E com essas regras conseguimos obter 18 recomendações para o nosso utilizador.
+Usando um valor de N (1,2,5), obtemos as seguintes recomendações:
+```{r echo=FALSE}
+load("LoadData/AssociationRules/AsRulesResults.RData")
+moviesRecommended1
+moviesRecommended2
+moviesRecommended5
+```
+
+**Informação não binária**
+
+Usando o método "arules" não conseguimos usar uma "RealRatingMatrix".
+
+### Collaborative Filtering
+  
+**Informação binária**  
+O primeiro passo foi converter a tabela ratingsTimed numa "BinaryRatingMatrix".  
+
+A seguir foram criados os dois modelos:
+
+* Item Based Collaborative Filtering (IBCF) com o método cosine e k=4
+* User Based Collaborative Filtering (UBCF) com o método cosine e nn=3
+
+Com os modelos criados, foi utilizado o utilizador newUserBinary.
+
+Para obter as recomendações para os filmes, aplicamos os dois modelos com diferentes números de N (1,2,5).  
+
+Resultados de User Based Collaborative Filtering (UBCF):
+```{r Show results Colaborative Binary User, echo=FALSE}
+load("LoadData/ColaFilte/ColaFilteBinaryResults.RData" )
+moviesRecommendedUB_1
+moviesRecommendedUB_2
+moviesRecommendedUB_5
+```
+
+Resultados de Item Based Collaborative Filtering (IBCF):
+```{r Show results Colaborative Binary Item, echo=FALSE}
+moviesRecommendedIB_1
+moviesRecommendedIB_2
+moviesRecommendedIB_5
+```
+
+
+
+**Informação não binária**  
+Este procedimento foi idêntico ao anterior, mas em vez de convertermos a tabela numa "BinaryRatingMatrix", convertemos numa "RealratingMatrix" e usamos o utilizador newUserReal.  
+
+Para obter as recomendações para os filmes, aplicamos os dois modelos com diferentes número de N (1,2,5).  
+
+Resultados de User Based Collaborative Filtering (UBCF):  
+```{r echo=FALSE}
+load("LoadData/ColaFilte/ColaFilteRealResults.RData" )
+moviesRecommendedUB_1
+moviesRecommendedUB_2
+moviesRecommendedUB_5
+```
+
+Resultados de Item Based Collaborative Filtering (IBCF):    
+```{r echo=FALSE}
+moviesRecommendedIB_1
+moviesRecommendedIB_2
+moviesRecommendedIB_5
+```
+
+
+
+
+## Analise of the results
+Com o objetivo de avaliar a performance dos modelos foi usado método de validação cruzada.
+Tendo em conta que o modelo de association rules só foi possivel usando a binaryRatingMatrix, este só foi testado em relação a isso. Os restantes modelos falados neste trabalho, foram restados usando as duas variantes das matrizes.  
+Seguidamente foi definido o 5-fold cross validation para avaliação dos modelos e os respetivos métodos de previsão.  
+```{r  eval=FALSE, include=TRUE}
+# definicao de 5-fold cross validation
+ecross_real <- evaluationScheme(rat_real_matrix, method="cross-validation",
+                                k=5, given=-1, goodRating=0)
+
+ecross_binary <- evaluationScheme(rat_binary_matrix, method="cross-validation",
+                                  k=5, given=-1, goodRating=0)
+
+### metodo de previsão
+methods_real <- list(popular = list(name = "POPULAR", param = NULL),
+        `user-based CF` = list(name = "UBCF", param = list(method = "cosine", nn = 3)), 
+        `item-based CF` = list(name = "IBCF", param = list(method = "cosine", k = 4)))
+
+
+methods_binary  <- list(AR = list(name ="AR", param = list(support=0.05, confidence=0.75)), 
+          popular = list(name = "POPULAR", param = NULL), 
+          `user-based CF` = list(name = "UBCF",param = list(method = "cosine", nn = 3)), 
+          `item-based CF` = list(name = "IBCF", param = list(method = "cosine", k = 4)))
+
+```
+
+Por fim, foram obtidos os resultados para os métodos de popularidade, IBCF, UBCF e regras de associação. Dado que tínhamos um grande número de dados, houve problemas com o espaço na RAM quando corríamos o método UBCF. Por isso foi feito um sampling de 200000 linhas da table ratingsTimed.  
+Para que seja possível visualizar as medidas de precisão e do recall de todos os modelos, prosseguiu-se com a junção de resultados das regras de associação com os restantes métodos e foi obtido o seguinte gráfico:  
+
+**Matrix Binária**  
+
+```{r echo=FALSE, fig.show='hold'}
+load("LoadData/results_CrossValidation.RData")
+plot(results_real, 'prec/rec')
+```
+
+Relativamente ao método de binaryRatingMatrix, os resultados indicam que o item-besed CF é o método que apresenta os melhores resultado de precisão e de recall, apesar de diminuir com o número de recomendações. A performance do método de popularidade tem um comportamento semelhante ao de item-based CF, com a diferença de que decresce muito mais rapidamente com o aumento de número de recomendações
+O método de regras de associação e o user-based CF são os que têm a pior performance, sendo o método de associação é ligeiramente melhor do que o de user-based CF, tanto na precisão como no recall.  
+
+**Matrix Real**  
+
+```{r echo=FALSE, fig.show='hold'}
+plot(results_binary, 'prec/rec')
+```
+
+Relativamente ao método de realRatingMatrix, os resultados indicam que item-based-CF e o método de popularidade são métodos que tem o melhor recall, porém o item-based-CF ganha na precisão para 5 filmes recomendados. Por sua vez, o método de popularidade, para um filme recomendado é o método que tem a maior precisão. Independentemente de número de recomendações o user-based-CF é o método com os piores resultados de precisão e de recall.  
+
+Em geral, o método de binaryRatingMatrix tem uma performance muito melhor do que o realRatingMatrix.  
+
+
+## Context-aware recommendations
+
+Para abordar o problema de recomendação de acordo com um contexto, foi adotada a seguinte estratégia:  
+
+* A informação relativa as idades e do género dos utilizadores foi distribuída em ranges de 5 anos, como por exemplo, consegue-se visualizar na seguinte tabela, de acordo com o número de pessoas que satisfazem estas condições:
+
+```{r echo=FALSE, warning=FALSE,fig.height=5}
+load("LoadData/ContextAware/ggplot_age_bin.RData")
+ggplot_age_bin
+```
+
+Foi verificado que na sample a usar, havia mais utilizadores entre 15 e 20 anos tanto do sexo masculino como o de feminino; e com o avançar da idade o número de utilizadores tende a diminuir.   
+
+Após a divisão da informação de acordo com os ranges das idades e do género dos utilizadores é aplicado o método da popularidade, de acordo com as seguintes instruções:  
+
+* Como exemplo foi escolhido um utilizador aleatório do sexo feminino com 28 anos de idade e de seguida foi encontrado o range das idades que contém este valor:
+
+```{r eval=FALSE, include=TRUE}
+#select user with age 28 and gender female
+x <- 28
+g <- "Female"
+
+#find range that contains age value
+for(i in age_range){
+  if ( (x >= as.numeric( sub("\\((.+),.*", "\\1", i)) ) & 
+       (x < as.numeric( sub("[^,]*,([^]]*)\\]", "\\1", i) ))){
+    
+    selected_range <- c(as.numeric( sub("\\((.+),.*", "\\1", i)),  
+    as.numeric( sub("[^,]*,([^]]*)\\]", "\\1", i) ))
+    }
+  }
+```
+
+* Assim obtém-se a informação de utilizadores que têm as mesmas características que o utilizador escolhido aleatoriamente para fazer a recomendação (nesta tabela só mostramos as 10 primeiras linhas) : 
+
+```{r echo=FALSE, warning=FALSE}
+load("LoadData/ContextAware/profile_context.RData")
+kable(profile_context, caption="Utilizadores com as mesmas características")
+```
+
+* De seguida é aplicado o método de popularidade a informação previamente filtrada por range das idades e o género; e é obtido o resultado da recomendação (usando o utilizador newUserReal)
+
+```{r echo=FALSE, warning=FALSE}
+load("LoadData/ContextAware/Results.RData")
+moviesRecommended
+```
+
+
+## Conclusions, shortcomings and future work
+Visto que para cada modelo (excepto association rules) foram aplicadas as duas abordagens: Usando as ratings dos utilizadores (realRantingMatrix) ou a indicação se um utilizador viu um determinado filme (binaryRatingMatrix), era esperado ter recomendações diferentes para o mesmo modelo mas com matrizes diferentes, o que se verificou.   
+No âmbito dos sistemas de recomendação sensíveis ao contexto, seria uma mais valia desenvolver um algoritmo de web scrapping que possa acrescentar a informação do género dos filmes (comédia, thriller, drama, etc). Assim, para além de fazer um sistema de recomedação baseado no range das idades e do sexo do utilizador, seria possível recomendar um filme com maior precisão, ao dispistar os géneros de filmes preferidos do utilizador em questão.  
+Como trabalho futuro seria aplicar os modelos a utilizadores reais e testar as suas precisões.  
+
+
+
