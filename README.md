@@ -1,4 +1,4 @@
-# Movies Recommendation in Flixste
+# Movies Recommendation in Flixster
 
 ### Inês Rocha, Alona Spasenko (2020)
 
