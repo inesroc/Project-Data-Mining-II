@@ -1,6 +1,7 @@
 # Movies Recommendation in Flixster
 
-### Inês Rocha, Alona Spasenko (2020)
+### Inês Rocha (up201606266) , Alona Spasenko (up201206798)
+#### Data Mining II, Faculdade de Ciências (2020)
 
 ## Introduction
 
